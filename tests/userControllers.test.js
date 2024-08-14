@@ -3,19 +3,25 @@ const app = require('../app');
 const User = require('../Models/userSchema');
 const jwt = require('jsonwebtoken');
 const authMiddleware = require('../Middleware/authMiddleware');
+const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
 
-// Mock Mongoose model
 jest.mock('../Models/userSchema');
 
-// Mock jwt
+jest.mock('bcryptjs', () => ({
+    hash: jest.fn((password, salt) => `hashed_${password}`),
+    compare: jest.fn((password, hashedPassword) => password === hashedPassword)
+}));
+
+
 jest.mock('jsonwebtoken', () => ({
     sign: jest.fn(() => 'mocked_jwt_token')
 }));
 
-// Mock authMiddleware 
 jest.mock('../Middleware/authMiddleware', () => jest.fn((req, res, next) => next()));
 
-//1. Testing User Registration
+
+// 1. Testing User Registration
 // Two cases: 1. User registration with valid input, 2. User registration with invalid input
 describe('User Registration', () => {
     afterEach(() => {
@@ -23,7 +29,6 @@ describe('User Registration', () => {
     });
 
     it('POST /poc/v1/users/register should register a new user', async () => {
-        // Mock save method
         User.prototype.save = jest.fn().mockResolvedValueOnce({
             _id: 'mocked_user_id',
             email: 'testuser@example.com',
@@ -39,11 +44,11 @@ describe('User Registration', () => {
 
         expect(response.status).toBe(201);
         expect(response.body.message).toBe('User registered successfully');
+        expect(bcrypt.hash).toHaveBeenCalledWith('password123', 10);
         expect(User.prototype.save).toHaveBeenCalled();
     });
 
     it('POST /poc/v1/users/register should fail with invalid input', async () => {
-        // Mock save method with error
         User.prototype.save = jest.fn().mockImplementationOnce(() => {
             throw new Error('User validation failed');
         });
@@ -60,8 +65,10 @@ describe('User Registration', () => {
     });
 });
 
-//2. Testing User Login
+
+// 2. Testing User Login
 // Three cases: 1. User login with correct credentials, 2. User login with incorrect email, 3. User login with incorrect password
+
 describe('User Login', () => {
     afterEach(() => {
         jest.clearAllMocks();
@@ -72,12 +79,11 @@ describe('User Login', () => {
             _id: 'mocked_user_id',
             email: 'mockuser@example.com',
             password: 'hashed_password',
-            role: 'user',
-            comparePassword: jest.fn().mockResolvedValue(true)
+            role: 'user'
         };
 
-        // Mock User.findOne to return the mockUser
         User.findOne.mockResolvedValue(mockUser);
+        bcrypt.compare.mockResolvedValueOnce(true); // Ensure this is set to true
 
         const response = await request(app)
             .post('/poc/v1/users/login')
@@ -89,7 +95,7 @@ describe('User Login', () => {
         expect(response.status).toBe(200);
         expect(response.body.token).toBe('mocked_jwt_token');
         expect(User.findOne).toHaveBeenCalledWith({ email: 'mockuser@example.com' });
-        expect(mockUser.comparePassword).toHaveBeenCalledWith('password123');
+        expect(bcrypt.compare).toHaveBeenCalledWith('password123', 'hashed_password');
         expect(jwt.sign).toHaveBeenCalledWith(
             {
                 id: 'mocked_user_id',
@@ -102,7 +108,6 @@ describe('User Login', () => {
     });
 
     it('POST /poc/v1/users/login should return 404 if user not found', async () => {
-        // Mock User.findOne to return empty result
         User.findOne.mockResolvedValue(null);
 
         const response = await request(app)
@@ -122,12 +127,12 @@ describe('User Login', () => {
             _id: 'mocked_user_id',
             email: 'mockuser@example.com',
             password: 'hashed_password',
-            role: 'user',
-            comparePassword: jest.fn().mockResolvedValue(false)
+            role: 'user'
         };
 
-        // Mock User.findOne to return the mockUser
         User.findOne.mockResolvedValue(mockUser);
+
+        bcrypt.compare.mockResolvedValueOnce(false);
 
         const response = await request(app)
             .post('/poc/v1/users/login')
@@ -139,11 +144,11 @@ describe('User Login', () => {
         expect(response.status).toBe(400);
         expect(response.body.message).toBe('Invalid password');
         expect(User.findOne).toHaveBeenCalledWith({ email: 'mockuser@example.com' });
-        expect(mockUser.comparePassword).toHaveBeenCalledWith('wrongpassword');
-    });    
+        expect(bcrypt.compare).toHaveBeenCalledWith('wrongpassword', 'hashed_password');
+    });
 });
 
-//3. Testing User Retrieval
+// 3. Testing User Retrieval
 // Three cases: 1. Retrieve all users, 2. Retrieve a user by ID, 3. Retrieve a user by non-existent ID
 describe('User Retrieval', () => {
     afterEach(() => {
@@ -151,7 +156,6 @@ describe('User Retrieval', () => {
     });
 
     it('GET /poc/v1/users should return all users', async () => {
-        // Mock the find method
         User.find.mockResolvedValueOnce([
             { _id: 'user1_id', email: 'user1@example.com', role: 'user' },
             { _id: 'user2_id', email: 'user2@example.com', role: 'admin' }
@@ -167,8 +171,19 @@ describe('User Retrieval', () => {
         expect(User.find).toHaveBeenCalled();
     });
 
+    it('GET /poc/v1/users should return 500 if there is a server error', async () => {
+        User.find.mockImplementationOnce(() => {
+            throw new Error('Database error');
+        });
+
+        const response = await request(app).get('/poc/v1/users');
+
+        expect(response.status).toBe(500);
+        expect(response.body.message).toBe('Server error');
+        expect(response.body.error).toBe('Database error');
+    });
+
     it('GET /poc/v1/users/:id should return a user by ID', async () => {
-        // Mock the findById method
         User.findById.mockResolvedValueOnce({
             _id: 'user1_id',
             email: 'user1@example.com',
@@ -187,7 +202,6 @@ describe('User Retrieval', () => {
     });
 
     it('GET /poc/v1/users/:id should return 404 if user not found', async () => {
-        // Mock the findById method to return null
         User.findById.mockResolvedValueOnce(null);
 
         const response = await request(app).get('/poc/v1/users/nonexistent_id');
@@ -195,6 +209,18 @@ describe('User Retrieval', () => {
         expect(response.status).toBe(404);
         expect(response.body.message).toBe('User not found');
         expect(User.findById).toHaveBeenCalledWith('nonexistent_id');
+    });
+
+    it('GET /poc/v1/users/:id should return 500 if there is a server error', async () => {
+        User.findById.mockImplementationOnce(() => {
+            throw new Error('Database error');
+        });
+
+        const response = await request(app).get('/poc/v1/users/user1_id');
+
+        expect(response.status).toBe(500);
+        expect(response.body.message).toBe('Server error');
+        expect(response.body.error).toBe('Database error');
     });
 });
 
@@ -206,7 +232,6 @@ describe('User Update', () => {
     });
 
     it('PUT /poc/v1/users/:id should update a user', async () => {
-        // Mock the findByIdAndUpdate method
         User.findByIdAndUpdate.mockResolvedValueOnce({
             _id: 'user1_id',
             email: 'updateduser@example.com',
@@ -215,7 +240,6 @@ describe('User Update', () => {
 
         const response = await request(app)
             .put('/poc/v1/users/user1_id')
-            .set('Content-Type', 'application/json') // Set the content type to JSON here
             .send({
                 email: 'updateduser@example.com'
             });
@@ -235,12 +259,10 @@ describe('User Update', () => {
     });
 
     it('PUT /poc/v1/users/:id should return 404 if user not found', async () => {
-        // Mock the findByIdAndUpdate method to return null
         User.findByIdAndUpdate.mockResolvedValueOnce(null);
 
         const response = await request(app)
             .put('/poc/v1/users/nonexistent_id')
-            .set('Content-Type', 'application/json')
             .send({
                 email: 'updateduser@example.com'
             });
@@ -253,6 +275,22 @@ describe('User Update', () => {
             { new: true }
         );
     });
+
+    it('PUT /poc/v1/users/:id should return 500 if there is a server error', async () => {
+        User.findByIdAndUpdate.mockImplementationOnce(() => {
+            throw new Error('Database error');
+        });
+
+        const response = await request(app)
+            .put('/poc/v1/users/user1_id')
+            .send({
+                email: 'updateduser@example.com'
+            });
+
+        expect(response.status).toBe(500);
+        expect(response.body.message).toBe('Server error');
+        expect(response.body.error).toBe('Database error');
+    });
 });
 
 // 5. Testing User Deletion
@@ -263,7 +301,6 @@ describe('User Deletion', () => {
     });
 
     it('DELETE /poc/v1/users/:id should delete a user', async () => {
-        // Mock the findByIdAndDelete method
         User.findByIdAndDelete.mockResolvedValueOnce({
             _id: 'user1_id',
             email: 'user1@example.com',
@@ -278,7 +315,6 @@ describe('User Deletion', () => {
     });
 
     it('DELETE /poc/v1/users/:id should return 404 if user not found', async () => {
-        // Mock the findByIdAndDelete method to return null
         User.findByIdAndDelete.mockResolvedValueOnce(null);
 
         const response = await request(app).delete('/poc/v1/users/nonexistent_id');
@@ -286,5 +322,17 @@ describe('User Deletion', () => {
         expect(response.status).toBe(404);
         expect(response.body.message).toBe('User not found');
         expect(User.findByIdAndDelete).toHaveBeenCalledWith('nonexistent_id');
+    });
+
+    it('DELETE /poc/v1/users/:id should return 500 if there is a server error', async () => {
+        User.findByIdAndDelete.mockImplementationOnce(() => {
+            throw new Error('Database error');
+        });
+
+        const response = await request(app).delete('/poc/v1/users/user1_id');
+
+        expect(response.status).toBe(500);
+        expect(response.body.message).toBe('Server error');
+        expect(response.body.error).toBe('Database error');
     });
 });
